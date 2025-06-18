@@ -1,0 +1,894 @@
+<!--
+  重要提示：此文件是HTML文件，需要在浏览器中运行
+  请勿使用Node.js执行，否则会出现语法错误
+  正确运行方式：
+    1. 右键文件选择"在浏览器中打开"
+    2. 或使用VSCode的Live Server扩展
+    3. 或使用命令：start custom_animation_canvas.html (Windows)
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Custom Animation Canvas</title>
+  <style>
+    body { display: flex; margin: 0; height: 100vh; }
+    #left-panel { width: 300px; padding: 10px; box-sizing: border-box; background: #f0f0f0; overflow-y: auto; }
+    #canvas-container { flex: 1; position: relative; overflow: auto; }
+    canvas {
+      width: 1600px !important;
+      height: 600px !important;
+      border: 1px solid #ccc;
+      cursor: crosshair;
+      display: block;
+    }
+    #layers, #paths { margin-top: 10px; list-style: none; padding: 0; }
+    #layers li, #paths li {
+      cursor: pointer;
+      padding: 4px;
+      margin: 2px 0;
+      background: #fff;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    #layers li.selected { background: #d0eaff; }
+    #paths li.selected { outline: 2px solid #000; }
+    #layers button, #paths button { margin-left: 4px; }
+    #codeBox { width: 100%; height: 120px; margin-top: 5px; font-family: monospace; }
+    #newPathBtn { margin-top: 10px; width: 100%; }
+    .section-label { margin-top: 10px; font-weight: bold; }
+  </style>
+</head>
+<body>
+
+  <div id="left-panel">
+    <button id="uploadBtn">Upload Images</button>
+    <button id="newPathBtn">New Path</button>
+
+    <h3>Paths</h3>
+    <ul id="paths"></ul>
+
+    <h3>Layers</h3>
+    <ul id="layers"></ul>
+
+    <div class="section-label" id="descLabel">Description:</div>
+    <textarea id="desc" rows="3" style="width:100%;" disabled></textarea>
+
+    <div class="section-label" id="codeLabel">Generated Code:</div>
+    <div style="display:flex; gap:5px; margin-bottom:5px;">
+      <button id="showLLMCodeBtn" class="code-tab active">LLM Code</button>
+      <button id="showFallbackCodeBtn" class="code-tab">Fallback Code</button>
+    </div>
+    <textarea id="codeBox" placeholder="LLM generated code will appear here…" style="display:block;"></textarea>
+    <textarea id="fallbackCodeBox" placeholder="Fallback code will appear here…" style="display:none; height:120px;"></textarea>
+
+    <div style="margin-top:5px;">
+      <button id="genBtn" disabled>Generate Code</button>
+      <button id="runBtn" disabled>Run All</button>
+      <button id="testLLMBtn" style="margin-top:10px;">Test LLM API</button>
+    </div>
+    
+    <style>
+      .code-tab {
+        padding: 4px 8px;
+        background: #e0e0e0;
+        border: none;
+        cursor: pointer;
+      }
+      .code-tab.active {
+        background: #4CAF50;
+        color: white;
+      }
+    </style>
+  </div>
+
+  <div id="canvas-container">
+    <canvas id="animationCanvas" width="1600" height="600"></canvas>
+  </div>
+
+  <!-- 添加OpenAI SDK (带备选CDN) -->
+  <script src="https://cdn.jsdelivr.net/npm/openai@4.0.0/browser/openai.min.js"></script>
+  <!-- 添加FileSaver.js用于可靠的文件保存 -->
+  <script src="https://cdn.jsdelivr.net/npm/file-saver@2.0.5/dist/FileSaver.min.js"></script>
+  <script>
+    // 检查SDK加载状态
+    window.addEventListener('load', () => {
+      if (typeof OpenAI === 'undefined') {
+        console.error('OpenAI SDK加载失败，尝试备选CDN');
+        const fallbackScript = document.createElement('script');
+        fallbackScript.src = 'https://cdnjs.cloudflare.com/ajax/libs/openai/4.0.0/openai.min.js';
+        document.head.appendChild(fallbackScript);
+      }
+      
+      // 检查FileSaver加载状态
+      if (typeof saveAs === 'undefined') {
+        console.error('FileSaver加载失败，尝试备选CDN');
+        const fallbackSaver = document.createElement('script');
+        fallbackSaver.src = 'https://cdnjs.cloudflare.com/ajax/libs/FileSaver.js/2.0.5/FileSaver.min.js';
+        document.head.appendChild(fallbackSaver);
+      }
+    });
+  </script>
+  
+  <script>
+    const canvas = document.getElementById('animationCanvas');
+    const ctx = canvas.getContext('2d');
+    const uploadBtn = document.getElementById('uploadBtn');
+    const newPathBtn = document.getElementById('newPathBtn');
+    const descInput = document.getElementById('desc');
+    const genBtn = document.getElementById('genBtn');
+    const runBtn = document.getElementById('runBtn');
+    const codeBox = document.getElementById('codeBox');
+    const layersList = document.getElementById('layers');
+    const pathsList = document.getElementById('paths');
+    const descLabel = document.getElementById('descLabel');
+    const codeLabel = document.getElementById('codeLabel');
+    
+    // 全局OpenAI客户端
+    let openaiClient = null;
+    // 当前激活的代码类型 ('llm' 或 'fallback')
+    let activeCodeType = 'llm';
+
+    let images = [];
+    let paths = [];
+    let selectedImageIndex = null;
+    let selectedPathIndex = null;
+    let createPathMode = false;
+    const defaultColors = ['#ff0000','#00ff00','#0000ff','#ffa500','#800080','#008080'];
+
+    let isDragging = false, isResizing = false, isDrawingPath = false;
+    let resizeCorner = null, dragOffset = { x:0, y:0 };
+
+    // 上传图片
+    uploadBtn.onclick = () => {
+      const input = document.createElement('input');
+      input.type = 'file'; input.accept = 'image/*'; input.multiple = true;
+      input.onchange = e => {
+        for (const file of e.target.files) {
+          const img = new Image();
+          img.onload = () => {
+            const scale = (canvas.width/2)/img.width;
+            images.unshift({
+              img,
+              x: canvas.width/4 - img.width*scale/2,
+              y: canvas.height/2 - img.height*scale/2,
+              w: img.width*scale,
+              h: img.height*scale
+            });
+            selectedImageIndex = 0;
+            refreshUI();
+          };
+          img.src = URL.createObjectURL(file);
+        }
+      };
+      input.click();
+    };
+
+    // 新建 / 取消 新路径
+    newPathBtn.onclick = () => {
+      createPathMode = !createPathMode;
+      newPathBtn.textContent = createPathMode ? 'Cancel Path' : 'New Path';
+      selectedImageIndex = selectedPathIndex = null;
+      refreshUI();
+    };
+
+    // 刷新界面：列表、按钮、画布
+    function refreshUI() {
+      updateLayers();
+      updatePaths();
+      updateUIState();
+      drawAll();
+      updateAnimationState();
+    }
+
+    // 更新图层列表
+    function updateLayers() {
+      layersList.innerHTML = '';
+      images.forEach((_, idx) => {
+        const li = document.createElement('li');
+        const displayIdx = images.length - 1 - idx;
+        li.textContent = 'Layer ' + (displayIdx+1);
+        li.className = (idx===selectedImageIndex ? 'selected' : '');
+        li.onclick = () => {
+          selectedImageIndex = idx;
+          selectedPathIndex = null;
+          refreshUI();
+        };
+        const upBtn = document.createElement('button');
+        upBtn.textContent='Up'; upBtn.disabled=(idx>=images.length-1);
+        upBtn.onclick = e => {
+          e.stopPropagation();
+          [images[idx],images[idx+1]] = [images[idx+1],images[idx]];
+          selectedImageIndex = idx+1;
+          refreshUI();
+        };
+        const downBtn = document.createElement('button');
+        downBtn.textContent='Down'; downBtn.disabled=(idx<=0);
+        downBtn.onclick = e => {
+          e.stopPropagation();
+          [images[idx],images[idx-1]] = [images[idx-1],images[idx]];
+          selectedImageIndex = idx-1;
+          refreshUI();
+        };
+        li.append(upBtn, downBtn);
+        layersList.appendChild(li);
+      });
+    }
+
+    // 更新路径列表
+    function updatePaths() {
+      pathsList.innerHTML = '';
+      paths.forEach((path, idx) => {
+        const li = document.createElement('li');
+        li.className = (idx===selectedPathIndex ? 'selected' : '');
+        li.onclick = () => {
+          selectedPathIndex = idx;
+          refreshUI();
+        };
+        const colorBox = document.createElement('span');
+        colorBox.style.cssText = `display:inline-block;width:12px;height:12px;
+          background:${path.color};margin-right:6px;`;
+        const label = document.createElement('span');
+        label.textContent = 'Path ' + (idx+1);
+        const sel = document.createElement('select');
+        sel.addEventListener('mousedown', e=>e.stopPropagation());
+        sel.addEventListener('click',     e=>e.stopPropagation());
+        const noneOpt = new Option('None','');
+        if (path.boundImageIndex===null) noneOpt.selected = true;
+        sel.appendChild(noneOpt);
+        images.forEach((_, imgIdx) => {
+          const opt = new Option('Layer '+(images.length-imgIdx), imgIdx);
+          if (path.boundImageIndex===imgIdx) opt.selected = true;
+          sel.appendChild(opt);
+        });
+        sel.onchange = () => path.boundImageIndex = sel.value==='' ? null : parseInt(sel.value);
+        const delBtn = document.createElement('button');
+        delBtn.textContent = 'Delete';
+        delBtn.onclick = e => {
+          e.stopPropagation();
+          paths.splice(idx,1);
+          if (selectedPathIndex===idx) selectedPathIndex=null;
+          refreshUI();
+        };
+        li.append(colorBox, label, sel, delBtn);
+        pathsList.appendChild(li);
+      });
+    }
+
+    // 更新底部表单、按钮状态
+    function updateUIState() {
+      // 只有选中路径且该路径至少有两点且已绑定图片，才能生成
+      let canGen = false;
+      if (selectedPathIndex !== null) {
+        const p = paths[selectedPathIndex];
+        canGen = Array.isArray(p.points) && p.points.length >= 2 && p.boundImageIndex !== null;
+      }
+      genBtn.disabled = !canGen;
+      descInput.disabled = (selectedPathIndex === null);
+      descLabel.textContent = selectedPathIndex!==null
+        ? `Description for Path ${selectedPathIndex+1}:`
+        : 'Description:';
+      codeLabel.textContent = selectedPathIndex!==null
+        ? `Code for Path ${selectedPathIndex+1}:`
+        : 'Generated Code:';
+      if (selectedPathIndex !== null) {
+        const p = paths[selectedPathIndex];
+        descInput.value = p.description || '';
+        codeBox.value   = p.generatedCode || '';
+        fallbackCodeBox.value = p.fallbackCode || '';
+      } else {
+        descInput.value = '';
+        codeBox.value   = '';
+        fallbackCodeBox.value = '';
+      }
+      // Run All 只在至少一条路径已有代码并绑定图片时可用
+      const hasRunable = paths.some(p => p.generatedCode && p.boundImageIndex!==null);
+      runBtn.disabled = !hasRunable;
+      
+      // 重置代码显示状态
+      document.getElementById('showLLMCodeBtn').click();
+    }
+
+    // 绘制画布内容
+    function drawAll() {
+      ctx.clearRect(0,0,canvas.width,canvas.height);
+      // 绘制路径
+      for (const path of paths) {
+        if (!Array.isArray(path.points) || path.points.length < 2) continue;
+        ctx.strokeStyle = path.color; ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(path.points[0].x, path.points[0].y);
+        for (let pt of path.points) ctx.lineTo(pt.x, pt.y);
+        ctx.stroke();
+      }
+      // 绘制图片
+      images.forEach((o, i) => {
+        ctx.drawImage(o.img, o.x, o.y, o.w, o.h);
+        if (i === selectedImageIndex) {
+          const corners = [
+            {x:o.x,y:o.y}, {x:o.x+o.w,y:o.y},
+            {x:o.x,y:o.y+o.h}, {x:o.x+o.w,y:o.y+o.h}
+          ];
+          for (let c of corners) {
+            ctx.fillStyle = '#fff'; ctx.strokeStyle = '#000';
+            ctx.fillRect(c.x-4,c.y-4,8,8);
+            ctx.strokeRect(c.x-4,c.y-4,8,8);
+          }
+        }
+      });
+    }
+
+    // 画布交互：创建路径、拖拽、缩放
+    canvas.onmousedown = e => {
+      const mx = e.offsetX, my = e.offsetY;
+      if (createPathMode) {
+        isDrawingPath = true;
+        paths.push({
+          points: [{x:mx,y:my}],
+          color: defaultColors[paths.length % defaultColors.length],
+          boundImageIndex: null,
+          description: '',
+          generatedCode: ''
+        });
+        selectedPathIndex = paths.length - 1;
+        createPathMode = false;
+        newPathBtn.textContent = 'New Path';
+        refreshUI();
+        return;
+      }
+      // 缩放角检测
+      if (selectedImageIndex !== null) {
+        const o = images[selectedImageIndex];
+        const corners = [
+          {x:o.x,y:o.y},{x:o.x+o.w,y:o.y},
+          {x:o.x,y:o.y+o.h},{x:o.x+o.w,y:o.y+o.h}
+        ];
+        for (let i = 0; i < 4; i++) {
+          if (Math.abs(mx - corners[i].x) <= 6 && Math.abs(my - corners[i].y) <= 6) {
+            isResizing = true; resizeCorner = i; return;
+          }
+        }
+      }
+      // 图片拖拽检测
+      for (let i = 0; i < images.length; i++) {
+        const o = images[i];
+        if (mx >= o.x && mx <= o.x+o.w && my >= o.y && my <= o.y+o.h) {
+          selectedImageIndex = i;
+          selectedPathIndex = null;
+          dragOffset.x = mx - o.x;
+          dragOffset.y = my - o.y;
+          isDragging = true;
+          refreshUI();
+          return;
+        }
+      }
+    };
+
+    canvas.onmousemove = e => {
+      const mx = e.offsetX, my = e.offsetY;
+      if (isResizing && selectedImageIndex !== null) {
+        const o = images[selectedImageIndex];
+        switch(resizeCorner) {
+          case 0: o.w += o.x-mx; o.h += o.y-my; o.x = mx; o.y = my; break;
+          case 1: o.w = mx-o.x;   o.h += o.y-my; o.y = my;      break;
+          case 2: o.w += o.x-mx;   o.x = mx;      o.h = my-o.y; break;
+          case 3: o.w = mx-o.x;    o.h = my-o.y;               break;
+        }
+        drawAll();
+      } else if (isDragging && selectedImageIndex !== null) {
+        images[selectedImageIndex].x = mx - dragOffset.x;
+        images[selectedImageIndex].y = my - dragOffset.y;
+        drawAll();
+      } else if (isDrawingPath && selectedPathIndex !== null) {
+        paths[selectedPathIndex].points.push({x:mx,y:my});
+        drawAll();
+      }
+    };
+
+    canvas.onmouseup = () => {
+      isResizing = isDragging = isDrawingPath = false;
+    };
+
+    // 同步描述到当前 path
+    descInput.oninput = () => {
+      if (selectedPathIndex !== null) {
+        paths[selectedPathIndex].description = descInput.value;
+      }
+    };
+    
+    // 代码显示切换
+    document.getElementById('showLLMCodeBtn').onclick = () => {
+      document.getElementById('codeBox').style.display = 'block';
+      document.getElementById('fallbackCodeBox').style.display = 'none';
+      document.getElementById('showLLMCodeBtn').classList.add('active');
+      document.getElementById('showFallbackCodeBtn').classList.remove('active');
+      activeCodeType = 'llm';
+    };
+    
+    document.getElementById('showFallbackCodeBtn').onclick = () => {
+      document.getElementById('codeBox').style.display = 'none';
+      document.getElementById('fallbackCodeBox').style.display = 'block';
+      document.getElementById('showFallbackCodeBtn').classList.add('active');
+      document.getElementById('showLLMCodeBtn').classList.remove('active');
+      activeCodeType = 'fallback';
+    };
+
+    // 生成动画代码 (使用fetch API)
+    genBtn.onclick = async () => {
+      const p = paths[selectedPathIndex];
+      // 确保点数和绑定
+      if (!Array.isArray(p.points) || p.points.length < 2) {
+        alert('请绘制至少两点的路径'); return;
+      }
+      if (p.boundImageIndex === null) {
+        alert('请先在列表中绑定一张图片'); return;
+      }
+
+      // 禁用按钮并显示加载状态
+      const originalText = genBtn.textContent;
+      genBtn.disabled = true;
+      genBtn.textContent = '生成中...';
+
+      try {
+        const API_KEY = "7acecda5-cbc2-4b21-8971-6e0b732b2861";
+        const API_URL = "https://ark.cn-beijing.volces.com/api/v3/chat/completions";
+        const MODEL = "ep-20250618142449-xklsh";
+        
+        if (!API_KEY) {
+          throw new Error('请配置LLM API密钥');
+        }
+        
+        // 准备请求数据
+        const requestData = {
+          model: MODEL,
+          messages: [
+            {
+              role: 'system',
+              content: '你是一个动画代码生成专家。用户提供路径点、绑定图片和描述，你需要生成JavaScript动画代码。要求：1. 代码必须使用requestAnimationFrame实现动画；2. 图片对象通过window.animationState.images访问；3. 图片位置通过obj.x和obj.y设置；4. 动画完成后必须保留最后一帧；5. 对于需要重新赋值的变量（如动画循环中的时间变量），必须使用let声明，而不是const'
+            },
+            {
+              role: 'user',
+              content: `生成动画代码：
+- 描述: ${p.description || '无描述'}
+- 路径点: ${JSON.stringify(p.points)}
+- 绑定图片索引: ${p.boundImageIndex}
+- 画布尺寸: ${canvas.width}x${canvas.height}
+
+代码要求：
+1. 必须使用requestAnimationFrame实现动画循环
+2. 图片对象必须通过window.animationState.images[索引]访问
+3. 必须包含完整的位置插值计算
+4. 动画结束后图片停留在终点
+5. 必须是立即执行的函数表达式(IIFE)
+6. 代码必须简洁
+7. 使用紧凑语法避免冗长
+8. 对于需要重新赋值的变量（如时间变量），必须使用let声明
+
+示例格式：
+;(function(){
+  const pts = [...];
+  const img = window.animationState.images[0];
+  let start = null;
+  function step(ts) {
+    if (!start) start = ts;
+    const progress = Math.min((ts - start)/2000, 1);
+    // 计算当前位置
+    requestAnimationFrame(step);
+  }
+  requestAnimationFrame(step);
+})();
+
+请只返回JavaScript代码，不要包含任何解释或注释。`
+            }
+          ],
+          temperature: 0.2,
+          max_tokens: 10000
+        };
+        
+        // 发送fetch请求并获取响应文本文本
+        const response = await fetch(API_URL, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${API_KEY}`
+          },
+          body: JSON.stringify(requestData)
+        });
+        
+        // 读取响应文本（只声明一次）
+        const responseText = await response.text();
+        
+        if (!response.ok) {
+          throw new Error(`API请求失败: ${response.status} - ${responseText}`);
+        }
+        
+        let result;
+        try {
+          // 尝试解析JSON
+          result = JSON.parse(responseText);
+        } catch (e) {
+          // 处理特殊字符问题
+          const sanitizedText = responseText
+            .replace(/[\x00-\x1F\x7F-\x9F]/g, '') // 移除控制字符
+            .replace(/\n/g, '\\n') // 转义换行符
+            .replace(/\r/g, '\\r') // 转义回车符
+            .replace(/\t/g, '\\t'); // 转义制表符
+            
+          throw new Error(`JSON解析失败: ${e.message}\n响应文本: ${sanitizedText.substring(0, 500)}`);
+        }
+        
+        // 调试：记录完整API响应
+        console.log('API完整响应:', result);
+        
+        // 检查API响应是否完整
+        if (result.choices[0].finish_reason === 'length') {
+          throw new Error('API响应被截断，请尝试简化描述或减少路径点');
+        }
+        
+        const generatedCode = result.choices[0]?.message?.content || '';
+        
+        if (!generatedCode.trim()) {
+          throw new Error(`API返回空代码。完整响应: ${JSON.stringify(result)}`);
+        }
+        
+        // 检查代码完整性（简单括号匹配）
+        const openBrackets = (generatedCode.match(/\(/g) || []).length;
+        const closeBrackets = (generatedCode.match(/\)/g) || []).length;
+        // 检查代码完整性
+        const openParens = (generatedCode.match(/\(/g) || []).length;
+        const closeParens = (generatedCode.match(/\)/g) || []).length;
+        const openCurly = (generatedCode.match(/\{/g) || []).length;
+        const closeCurly = (generatedCode.match(/\}/g) || []).length;
+        const openSquare = (generatedCode.match(/\[/g) || []).length;
+        const closeSquare = (generatedCode.match(/\]/g) || []).length;
+        
+        if (openParens !== closeParens ||
+            openCurly !== closeCurly ||
+            openSquare !== closeSquare) {
+          throw new Error(`生成的代码结构不完整（圆括号:${openParens}/${closeParens}, 花括号:${openCurly}/${closeCurly}, 方括号:${openSquare}/${closeSquare}）。代码内容: ${generatedCode}`);
+        }
+        
+        // 确保代码以分号结束
+        if (!generatedCode.trim().endsWith(';')) {
+          generatedCode += ';';
+        }
+        
+        // 检查const变量被重新赋值的问题
+        const constAssignRegex = /const\s+\w+\s*=[^;]*;\s*\w+\s*=/g;
+        if (constAssignRegex.test(generatedCode)) {
+          throw new Error('生成的代码包含对const变量的重新赋值，请使用let声明需要修改的变量');
+        }
+        
+        p.generatedCode = generatedCode;
+        p.fallbackCode = ''; // 清空回退代码
+        codeBox.value = generatedCode;
+        fallbackCodeBox.value = '';
+        // 默认显示LLM代码
+        document.getElementById('showLLMCodeBtn').click();
+        
+        // 调试：记录生成的代码
+        console.log('生成的代码:', generatedCode);
+        
+        // 保存完整API响应到文件（调试用）
+        const fullResponse = {
+          request: requestData,
+          response: result,
+          generatedCode: generatedCode
+        };
+        const blob = new Blob([JSON.stringify(fullResponse, null, 2)], {type: 'application/json'});
+        const filename = `llm-response-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+        
+        // 添加详细下载状态日志
+        console.log('准备保存调试文件:', filename, '大小:', blob.size, '字节');
+        
+        // 添加用户可见的下载提示
+        const downloadStatus = document.createElement('div');
+        downloadStatus.id = 'download-status';
+        downloadStatus.style.cssText = 'position:fixed; top:10px; right:10px; padding:10px; background:#4CAF50; color:white; z-index:1000;';
+        downloadStatus.textContent = `正在下载: ${filename}`;
+        document.body.appendChild(downloadStatus);
+        
+        try {
+          if (typeof saveAs !== 'undefined') {
+            console.log('使用FileSaver保存文件');
+            saveAs(blob, filename);
+            console.log('文件保存成功:', filename);
+            downloadStatus.textContent = `下载成功: ${filename}`;
+            downloadStatus.style.background = '#4CAF50';
+          } else {
+            throw new Error('FileSaver未定义');
+          }
+        } catch (e) {
+          console.error('FileSaver保存失败:', e);
+          downloadStatus.textContent = `FileSaver失败: ${e.message}`;
+          downloadStatus.style.background = '#f44336';
+          
+          // 回退到原始方法
+          console.log('尝试使用a标签下载');
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = filename;
+          a.style.display = 'none';
+          document.body.appendChild(a);
+          
+          // 添加点击事件监听器记录状态
+          a.addEventListener('click', () => {
+            console.log('下载链接被点击');
+            downloadStatus.textContent = '开始下载...';
+          });
+          
+          // 模拟点击
+          a.click();
+          
+          // 清理
+          setTimeout(() => {
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+            console.log('a标签下载完成');
+            downloadStatus.textContent = '下载完成';
+            setTimeout(() => document.body.removeChild(downloadStatus), 3000);
+          }, 1000);
+        }
+        
+        // 5秒后移除下载状态提示
+        setTimeout(() => {
+          if (document.body.contains(downloadStatus)) {
+            document.body.removeChild(downloadStatus);
+          }
+        }, 5000);
+      } catch (error) {
+        console.error('生成错误:', error);
+        
+        // 捕获详细错误信息
+        const errorDetails = {
+          name: error.name || '未知错误',
+          message: error.message || '无错误信息',
+          stack: error.stack || '无堆栈跟踪',
+          time: new Date().toISOString()
+        };
+        
+        // 检测跨域问题
+        let errorMsg = errorDetails.message;
+        if (errorMsg.includes('Failed to fetch') || errorMsg.includes('CORS')) {
+          errorMsg += '\n⚠️ 检测到跨域问题(CORS)，请确保API支持浏览器访问';
+        }
+        
+        // 在页面上显示详细错误
+        const errorDisplay = `// ====== 错误报告 ======
+// 时间: ${errorDetails.time}
+// 类型: ${errorDetails.name}
+// 信息: ${errorDetails.message}
+// 堆栈跟踪:
+${errorDetails.stack.split('\n').map(line => `// ${line}`).join('\n')}
+
+// 请将此错误信息截图发送给开发者`;
+        
+        // 回退到原始生成方式
+        const fallbackCode = generateCodeFallback(p);
+        codeBox.value = `${errorDisplay}`;
+        fallbackCodeBox.value = fallbackCode;
+        // 显示回退代码
+        document.getElementById('showFallbackCodeBtn').click();
+        
+        // 更新路径对象的回退代码
+        p.fallbackCode = fallbackCode;
+        
+        // 高亮显示错误区域
+        codeBox.style.backgroundColor = '#fff0f0';
+        codeBox.style.border = '2px solid red';
+        
+        alert(`LLM生成失败: ${errorMsg}\n详细错误信息已显示在代码框中，请截图发送给开发者`);
+      } finally {
+        // 恢复按钮状态
+        genBtn.disabled = false;
+        genBtn.textContent = originalText;
+        refreshUI();
+      }
+    };
+
+    // 改进的回退代码生成方法（返回代码字符串）
+    function generateCodeFallback(p) {
+      const desc = p.description || '';
+      const speedMatch = desc.match(/(\d+)\s*px\/s/);
+      const speed      = speedMatch ? parseInt(speedMatch[1]) : 100;
+      const vibMatch   = desc.match(/振动\s*(\d+)\s*px|vibrate\s*(\d+)\s*px/);
+      const vibrate    = vibMatch ? parseInt(vibMatch[1]||vibMatch[2]) : 0;
+      let easing = 'linear';
+      if (desc.includes('ease-in-out')) easing='ease-in-out';
+      else if (desc.includes('ease-in'))   easing='ease-in';
+      else if (desc.includes('ease-out'))  easing='ease-out';
+      
+      // 计算路径总长度
+      let totalLen = 0;
+      for (let i=1; i<p.points.length; i++) {
+        const dx = p.points[i].x - p.points[i-1].x;
+        const dy = p.points[i].y - p.points[i-1].y;
+        totalLen += Math.hypot(dx,dy);
+      }
+      
+      // 计算动画持续时间
+      const duration = totalLen / speed;
+      
+      // 返回生成的代码字符串
+      return `;(function(){
+  const pts = ${JSON.stringify(p.points)};
+  const imgIdx = ${p.boundImageIndex};
+  const speed = ${speed};
+  const vibrate = ${vibrate};
+  const totalLen = ${totalLen.toFixed(2)};
+  const duration = ${duration.toFixed(2)};
+  
+  let start = null;
+  
+  function step(ts) {
+    if (!start) start = ts;
+    const elapsed = (ts - start) / 1000;
+    const progress = Math.min(elapsed / duration, 1);
+    
+    // 计算当前路径位置
+    let currentDist = progress * totalLen;
+    let segmentIndex = 0;
+    let accumulatedDist = 0;
+    
+    // 找到当前所在的路径段
+    while (segmentIndex < pts.length - 1) {
+      const dx = pts[segmentIndex+1].x - pts[segmentIndex].x;
+      const dy = pts[segmentIndex+1].y - pts[segmentIndex].y;
+      const segmentLen = Math.hypot(dx, dy);
+      
+      // 处理零长度段
+      if (segmentLen === 0) {
+        segmentIndex++;
+        continue;
+      }
+      
+      if (currentDist <= accumulatedDist + segmentLen) break;
+      
+      accumulatedDist += segmentLen;
+      segmentIndex++;
+    }
+    
+    if (segmentIndex >= pts.length - 1) {
+      // 动画结束
+      const img = window.animationState.images[imgIdx];
+      img.x = pts[pts.length-1].x - img.w/2;
+      img.y = pts[pts.length-1].y - img.h/2;
+      window.animationState.drawAll();
+      return;
+    }
+    
+    // 计算当前段内的位置
+    const dx = pts[segmentIndex+1].x - pts[segmentIndex].x;
+    const dy = pts[segmentIndex+1].y - pts[segmentIndex].y;
+    const segmentDist = currentDist - accumulatedDist;
+    const segmentLen = Math.hypot(dx, dy);
+    
+    let cx, cy;
+    if (segmentLen > 0) {
+      const ratio = segmentDist / segmentLen;
+      cx = pts[segmentIndex].x + dx * ratio;
+      cy = pts[segmentIndex].y + dy * ratio;
+    } else {
+      // 零长度段处理
+      cx = pts[segmentIndex].x;
+      cy = pts[segmentIndex].y;
+    }
+    
+    // 添加振动效果
+    if (vibrate > 0) {
+      cy += Math.sin(elapsed * Math.PI * 5) * vibrate;
+    }
+    
+    // 更新图片位置
+    const img = window.animationState.images[imgIdx];
+    img.x = cx - img.w/2;
+    img.y = cy - img.h/2;
+    window.animationState.drawAll();
+    
+    if (progress < 1) {
+      requestAnimationFrame(step);
+    }
+  }
+  
+  requestAnimationFrame(step);
+})();
+`;
+    }
+
+    // Run All 同步执行所有已生成代码
+    runBtn.onclick = () => {
+      for (const p of paths) {
+        if (p.generatedCode && p.boundImageIndex !== null) {
+          new Function(p.generatedCode)();
+        }
+      }
+    };
+    
+    // 测试LLM API连接（使用fetch API）
+    document.getElementById('testLLMBtn').onclick = async () => {
+      const originalText = codeBox.value;
+      codeBox.value = '正在测试LLM API连接...';
+      codeBox.style.backgroundColor = '#fff0f0';
+      
+      try {
+        const API_KEY = "7acecda5-cbc2-4b21-8971-6e0b732b2861";
+        const API_URL = "https://ark.cn-beijing.volces.com/api/v3/chat/completions";
+        const MODEL = "ep-20250618120523-5qfgx";
+        
+        if (!API_KEY) {
+          throw new Error('请配置LLM API密钥');
+        }
+        
+        // 准备请求数据
+        const requestData = {
+          model: MODEL,
+          messages: [
+            { role: 'system', content: '你是一个测试助手' },
+            { role: 'user', content: "请用一句话回复'API连接成功'" }
+          ],
+          temperature: 0.2,
+          max_tokens: 50
+        };
+        
+        // 发送fetch请求
+        const response = await fetch(API_URL, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${API_KEY}`
+          },
+          body: JSON.stringify(requestData)
+        });
+        
+        if (!response.ok) {
+          const errorText = await response.text();
+          throw new Error(`API请求失败: ${response.status} - ${errorText}`);
+        }
+        
+        const result = await response.json();
+        const reply = result.choices[0]?.message?.content || '无响应内容';
+        
+        codeBox.value = `// API测试成功\n// 响应内容: "${reply}"\n\n// 完整响应:\n${JSON.stringify(result, null, 2)}`;
+        codeBox.style.backgroundColor = '#f0fff0';
+      } catch (error) {
+        // 错误处理
+        const errorDetails = {
+          name: error.name || '未知错误',
+          message: error.message || '无错误信息',
+          stack: error.stack || '无堆栈跟踪',
+          time: new Date().toISOString()
+        };
+        
+        let errorMsg = errorDetails.message;
+        if (errorMsg.includes('Failed to fetch') || errorMsg.includes('CORS')) {
+          errorMsg += '\n⚠️ 检测到跨域问题(CORS)，请尝试以下解决方案：\n1. 启用浏览器CORS扩展\n2. 使用本地代理服务器\n3. 联系API提供商启用CORS';
+        }
+        
+        codeBox.value = `// ====== API测试失败 ======\n// 时间: ${errorDetails.time}\n// 类型: ${errorDetails.name}\n// 信息: ${errorMsg}\n// 堆栈跟踪:\n${errorDetails.stack.split('\n').map(line => `// ${line}`).join('\n')}\n\n// 请将此错误信息截图发送给开发者`;
+        codeBox.style.backgroundColor = '#fff0f0';
+      }
+    };
+
+    // 创建全局动画状态对象
+    window.animationState = {
+      images: [],
+      drawAll: function() {}
+    };
+    
+    // 初始化代码显示状态
+    document.getElementById('showLLMCodeBtn').classList.add('active');
+    
+    // 更新动画状态
+    function updateAnimationState() {
+      window.animationState.images = images;
+      window.animationState.drawAll = drawAll;
+    }
+    
+    // 初始加载
+    refreshUI();
+    updateAnimationState();
+  </script>
+</body>
+</html>
