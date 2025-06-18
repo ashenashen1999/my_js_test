@@ -404,14 +404,16 @@
       document.getElementById('showLLMCodeBtn').classList.add('active');
       document.getElementById('showFallbackCodeBtn').classList.remove('active');
       activeCodeType = 'llm';
+      genBtn.textContent = 'LLM Generate';
     };
-    
+
     document.getElementById('showFallbackCodeBtn').onclick = () => {
       document.getElementById('codeBox').style.display = 'none';
       document.getElementById('fallbackCodeBox').style.display = 'block';
       document.getElementById('showFallbackCodeBtn').classList.add('active');
       document.getElementById('showLLMCodeBtn').classList.remove('active');
       activeCodeType = 'fallback';
+      genBtn.textContent = 'Local Generate';
     };
 
     // 生成动画代码 (使用fetch API)
@@ -431,6 +433,16 @@
       genBtn.textContent = '生成中...';
 
       try {
+        if (activeCodeType === 'fallback') {
+          const fallbackCode = generateCodeFallback(p);
+          p.fallbackCode = fallbackCode;
+          p.generatedCode = '';
+          fallbackCodeBox.value = fallbackCode;
+          codeBox.value = '';
+          document.getElementById('showFallbackCodeBtn').click();
+          return;
+        }
+
         const API_KEY = "7acecda5-cbc2-4b21-8971-6e0b732b2861";
         const API_URL = "https://ark.cn-beijing.volces.com/api/v3/chat/completions";
         const MODEL = "ep-20250618142449-xklsh";
