@@ -58,10 +58,10 @@
     <div class="section-label" id="codeLabel">Generated Code:</div>
     <div style="display:flex; gap:5px; margin-bottom:5px;">
       <button id="showLLMCodeBtn" class="code-tab active">LLM Code</button>
-      <button id="showFallbackCodeBtn" class="code-tab">Fallback Code</button>
+      <button id="showFallbackCodeBtn" class="code-tab">Local Gen Code</button>
     </div>
     <textarea id="codeBox" placeholder="LLM generated code will appear here…" style="display:block;"></textarea>
-    <textarea id="fallbackCodeBox" placeholder="Fallback code will appear here…" style="display:none; height:120px;"></textarea>
+    <textarea id="fallbackCodeBox" placeholder="Local generated code will appear here…" style="display:none; height:120px;"></textarea>
 
     <div style="margin-top:5px;">
       <button id="genBtn" disabled>Generate Code</button>
@@ -404,6 +404,7 @@
       document.getElementById('showLLMCodeBtn').classList.add('active');
       document.getElementById('showFallbackCodeBtn').classList.remove('active');
       activeCodeType = 'llm';
+      genBtn.textContent = 'LLM Generate';
     };
     
     document.getElementById('showFallbackCodeBtn').onclick = () => {
@@ -412,6 +413,7 @@
       document.getElementById('showFallbackCodeBtn').classList.add('active');
       document.getElementById('showLLMCodeBtn').classList.remove('active');
       activeCodeType = 'fallback';
+      genBtn.textContent = 'Local Generate';
     };
 
     // 生成动画代码 (使用fetch API)
@@ -431,6 +433,14 @@
       genBtn.textContent = '生成中...';
 
       try {
+        if (activeCodeType === 'fallback') {
+          const fallbackCode = generateCodeFallback(p);
+          p.fallbackCode = fallbackCode;
+          fallbackCodeBox.value = fallbackCode;
+          document.getElementById('showFallbackCodeBtn').click();
+          return;
+        }
+
         const API_KEY = "7acecda5-cbc2-4b21-8971-6e0b732b2861";
         const API_URL = "https://ark.cn-beijing.volces.com/api/v3/chat/completions";
         const MODEL = "ep-20250618142449-xklsh";
