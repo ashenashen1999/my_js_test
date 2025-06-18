@@ -282,12 +282,19 @@
         codeBox.value   = '';
         fallbackCodeBox.value = '';
       }
-      // Run All 只在至少一条路径已有代码并绑定图片时可用
-      const hasRunable = paths.some(p => p.generatedCode && p.boundImageIndex!==null);
+      // Run All 只在至少一条路径已有对应代码并绑定图片时可用
+      const hasRunable = paths.some(p =>
+        (activeCodeType === 'llm' ? p.generatedCode : p.fallbackCode) &&
+        p.boundImageIndex !== null
+      );
       runBtn.disabled = !hasRunable;
-      
-      // 重置代码显示状态
-      document.getElementById('showLLMCodeBtn').click();
+
+      // 根据当前代码类型显示相应文本框
+      if (activeCodeType === 'llm') {
+        document.getElementById('showLLMCodeBtn').click();
+      } else {
+        document.getElementById('showFallbackCodeBtn').click();
+      }
     }
 
     // 绘制画布内容
@@ -414,7 +421,7 @@
       activeCodeType = 'fallback';
     };
 
-    // 生成动画代码 (使用fetch API)
+    // 生成动画代码，根据当前选中的代码类型决定生成方式
     genBtn.onclick = async () => {
       const p = paths[selectedPathIndex];
       // 确保点数和绑定
@@ -423,6 +430,16 @@
       }
       if (p.boundImageIndex === null) {
         alert('请先在列表中绑定一张图片'); return;
+      }
+
+      // 当选择回退代码时，直接生成本地代码
+      if (activeCodeType === 'fallback') {
+        const fallbackCode = generateCodeFallback(p);
+        p.fallbackCode = fallbackCode;
+        fallbackCodeBox.value = fallbackCode;
+        document.getElementById('showFallbackCodeBtn').click();
+        refreshUI();
+        return;
       }
 
       // 禁用按钮并显示加载状态
@@ -800,8 +817,9 @@ ${errorDetails.stack.split('\n').map(line => `// ${line}`).join('\n')}
     // Run All 同步执行所有已生成代码
     runBtn.onclick = () => {
       for (const p of paths) {
-        if (p.generatedCode && p.boundImageIndex !== null) {
-          new Function(p.generatedCode)();
+        const codeToRun = activeCodeType === 'llm' ? p.generatedCode : p.fallbackCode;
+        if (codeToRun && p.boundImageIndex !== null) {
+          new Function(codeToRun)();
         }
       }
     };
